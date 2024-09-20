@@ -12,7 +12,8 @@ from urllib.parse import unquote_plus
 
 import requests
 from django.conf import settings
-from django.contrib.auth import authenticate, get_user_model
+# from django.contrib.auth import authenticate, get_user_model
+from django.contrib.auth import authenticate, get_user_model, get_backends
 from django.contrib.auth.hashers import check_password, identify_hasher
 from django.core.exceptions import ObjectDoesNotExist
 from django.db import router, transaction
@@ -65,6 +66,17 @@ Grant = get_grant_model()
 RefreshToken = get_refresh_token_model()
 UserModel = get_user_model()
 
+def find_user_by_id(user_id):
+    user = None
+    backends = get_backends()
+     for auth_backend in backends:
+        try:
+            user = auth_backend.get_user(user_id)
+        except ValueError: 
+            continue
+         if user:
+            break
+    return user 
 
 class OAuth2Validator(RequestValidator):
     # Return the given claim only if the given scope is present.
@@ -456,7 +468,7 @@ class OAuth2Validator(RequestValidator):
 
         if access_token and access_token.is_valid(scopes):
             request.client = access_token.application
-            request.user = access_token.user
+            request.user = find_user_by_id(access_token.user)
             request.scopes = list(access_token.scopes)
 
             # this is needed by django rest framework
@@ -469,9 +481,10 @@ class OAuth2Validator(RequestValidator):
     def _load_access_token(self, token):
         token_checksum = hashlib.sha256(token.encode("utf-8")).hexdigest()
         return (
-            AccessToken.objects.select_related("application", "user")
-            .filter(token_checksum=token_checksum)
-            .first()
+            # AccessToken.objects.select_related("application", "user")
+            # .filter(token_checksum=token_checksum)
+            # .first()
+            AccessToken.objects.select_related("application").filter(token_checksum=token_checksum).first()
         )
 
     def validate_code(self, client_id, code, client, request, *args, **kwargs):
@@ -480,6 +493,7 @@ class OAuth2Validator(RequestValidator):
             if not grant.is_expired():
                 request.scopes = grant.scope.split(" ")
                 request.user = grant.user
+                find_user_by_id(grant.user)
                 if grant.nonce:
                     request.nonce = grant.nonce
                 if grant.claims:
@@ -624,7 +638,7 @@ class OAuth2Validator(RequestValidator):
                 access_token = AccessToken.objects.select_for_update().get(
                     pk=refresh_token_instance.access_token.pk
                 )
-                access_token.user = request.user
+                access_token.user = str(request.user.id)
                 access_token.scope = token["scope"]
                 access_token.expires = expires
                 access_token.token = token["access_token"]
@@ -687,7 +701,7 @@ class OAuth2Validator(RequestValidator):
         if id_token:
             id_token = self._load_id_token(id_token)
         return AccessToken.objects.create(
-            user=request.user,
+            user=str(request.user.id),
             scope=token["scope"],
             expires=expires,
             token=token["access_token"],
@@ -701,7 +715,7 @@ class OAuth2Validator(RequestValidator):
             expires = timezone.now() + timedelta(seconds=oauth2_settings.AUTHORIZATION_CODE_EXPIRE_SECONDS)
         return Grant.objects.create(
             application=request.client,
-            user=request.user,
+            user=str(request.user.id),
             code=code["code"],
             expires=expires,
             redirect_uri=request.redirect_uri,
@@ -718,7 +732,7 @@ class OAuth2Validator(RequestValidator):
         else:
             token_family = uuid.uuid4()
         return RefreshToken.objects.create(
-            user=request.user,
+            user=str(request.user.id),
             token=refresh_token_code,
             application=request.client,
             access_token=access_token,
@@ -809,7 +823,7 @@ class OAuth2Validator(RequestValidator):
         scopes = request.scope or " ".join(request.scopes)
 
         id_token = IDToken.objects.create(
-            user=request.user,
+            user=str(request.user.id),
             scope=scopes,
             expires=expires,
             jti=jti,
@@ -828,7 +842,7 @@ class OAuth2Validator(RequestValidator):
         if self._get_additional_claims_is_request_agnostic():
             claims = {"sub": lambda r: str(r.user.pk)}
         else:
-            claims = {"sub": str(request.user.pk)}
+            claims = {"sub": str(request.user.id)}
 
         # https://openid.net/specs/openid-connect-core-1_0.html#StandardClaims
         if self._get_additional_claims_is_request_agnostic():
